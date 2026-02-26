@@ -1,0 +1,60 @@
+version: "3.8"
+
+# Runs the entire ClearSight ETL + reporting stack on one VM
+# Start with: docker-compose up -d
+# View ETL logs: docker-compose logs -f etl
+# Stop: docker-compose down
+
+services:
+
+  # ── Target PostgreSQL database ─────────────────────────────────
+  # This is YOUR writable reporting DB. The ETL writes here.
+  # Power BI DirectQuery connects here.
+  target_db:
+    image: postgres:15-alpine
+    container_name: clearsight_target_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       clearsight_reporting
+      POSTGRES_USER:     etl_user
+      POSTGRES_PASSWORD: ${TARGET_PASS}
+    ports:
+      - "5433:5432"     # Exposed on 5433 so it doesn't clash with any local PG
+    volumes:
+      - target_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U etl_user -d clearsight_reporting"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Python ETL process ─────────────────────────────────────────
+  # Polls source PostgreSQL every 30 seconds and writes to target_db
+  etl:
+    build: ./clearsight_etl
+    container_name: clearsight_etl
+    restart: unless-stopped
+    depends_on:
+      target_db:
+        condition: service_healthy
+    environment:
+      SOURCE_HOST: ${SOURCE_HOST}
+      SOURCE_PORT: ${SOURCE_PORT:-5432}
+      SOURCE_DB:   ${SOURCE_DB}
+      SOURCE_USER: ${SOURCE_USER}
+      SOURCE_PASS: ${SOURCE_PASS}
+      TARGET_HOST: target_db        # Internal Docker network name
+      TARGET_PORT: "5432"
+      TARGET_DB:   clearsight_reporting
+      TARGET_USER: etl_user
+      TARGET_PASS: ${TARGET_PASS}
+    volumes:
+      - ./logs:/app/logs            # Persist ETL logs outside container
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  target_db_data:
